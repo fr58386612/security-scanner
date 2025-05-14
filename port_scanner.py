@@ -1,187 +1,171 @@
-import socket
-import threading
-from queue import Queue
+import subprocess
+import xml.etree.ElementTree as ET
 
-# 端口和服务映射，根据 security_scanner_plan.md
+# 端口和服务映射，主要用于Hydra兼容性
 PORT_SERVICE_MAP = {
     21: "ftp",
     22: "ssh",
     23: "telnet",
-    80: "http-get", # Hydra 使用 http-get
+    80: "http-get",
     110: "pop3",
     143: "imap",
-    443: "https-get", # Hydra 使用 https-get
+    443: "https-get",
     445: "smb",
     1433: "mssql",
-    1521: "oracle-listener", # Hydra 可能需要特定模块或调整
+    1521: "oracle-listener",
     3306: "mysql",
     3389: "rdp",
     5432: "postgres",
     5900: "vnc"
 }
 
-# 要扫描的端口列表
 DEFAULT_PORTS_TO_SCAN = list(PORT_SERVICE_MAP.keys())
 
-# 线程数
-MAX_THREADS = 20 # 可以根据实际情况调整
-
-# 扫描单个端口
-def scan_port(ip, port, open_ports_for_ip, custom_scan=False):
+def parse_nmap_xml_output(xml_output):
     """
-    尝试连接到指定IP的指定端口。
-    如果端口开放，则将其添加到 open_ports_for_ip 列表中。
-    Args:
-        ip (str): 目标IP.
-        port (int): 目标端口.
-        open_ports_for_ip (list): 用于收集此IP开放端口的列表.
-        custom_scan (bool): 如果为True，表示是自定义端口扫描，服务名可能未知.
+    解析 Nmap XML 输出并提取开放的端口和服务。
     """
+    open_services_by_ip = {}
     try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(1)  # 连接超时时间1秒
-        result = sock.connect_ex((ip, port))
-        if result == 0:
-            if custom_scan:
-                # 对于自定义端口，如果不在已知映射中，尝试通用获取或标记为unknown_custom
-                service_name = PORT_SERVICE_MAP.get(port)
-                if not service_name:
-                    try:
-                        service_name = socket.getservbyport(port)
-                    except OSError: # OSError if port/protocol not found
-                        service_name = f"unknown_custom_port_{port}" # Mark distinctly
-                # For Hydra, we still need a protocol string.
-                # If it's a custom port not in PORT_SERVICE_MAP, Hydra might not work unless it's a common service on a non-standard port.
-                # We will rely on PORT_SERVICE_MAP for Hydra compatibility.
-                # If a custom port is scanned and open, but not in PORT_SERVICE_MAP, it won't be Hydra'd unless user knows the protocol.
-                # For now, let's stick to PORT_SERVICE_MAP for service_name used by Hydra.
-                # The display can show the getservbyport result.
-                display_service_name = PORT_SERVICE_MAP.get(port, f"unknown_port_{port}") # Default for display
-                try:
-                    display_service_name = socket.getservbyport(port)
-                except OSError:
-                    pass # keep the default if getservbyport fails
-                
-                # For Hydra, the service_name must be one it understands.
-                # We will use the one from PORT_SERVICE_MAP if available, otherwise it's effectively un-Hydra-able by default.
-                hydra_service_name = PORT_SERVICE_MAP.get(port, "unknown") # Use this for the tuple passed to Hydra
-                open_ports_for_ip.append((port, hydra_service_name)) # hydra_service_name for consistency
-                # print(f"[SCAN] IP: {ip}, Port: {port} ({display_service_name}) is open.")
+        root = ET.fromstring(xml_output)
+        for host in root.findall('host'):
+            ip_address = host.find('address').get('addr')
+            ports_element = host.find('ports')
+            if ports_element is None:
+                continue
 
-            else: # Not a custom scan, or custom port is in PORT_SERVICE_MAP
-                service_name = PORT_SERVICE_MAP.get(port, "unknown")
-                open_ports_for_ip.append((port, service_name))
-                # print(f"[SCAN] IP: {ip}, Port: {port} ({service_name}) is open.")
-        sock.close()
-    except socket.error as e:
-        # print(f"[SCAN_ERROR] IP: {ip}, Port: {port}, Error: {e}")
-        pass # 静默处理连接错误
+            open_ports_for_ip = []
+            for port_element in ports_element.findall('port'):
+                if port_element.find('state').get('state') == 'open':
+                    port_id = int(port_element.get('portid'))
+                    service_element = port_element.find('service')
+                    nmap_service_name = "unknown"
+                    if service_element is not None and service_element.get('name'):
+                        nmap_service_name = service_element.get('name')
+                    
+                    # 优先使用 PORT_SERVICE_MAP 中的服务名以兼容 Hydra
+                    # 如果端口不在 PORT_SERVICE_MAP 中，则尝试使用 nmap 提供的服务名
+                    # 如果 nmap 也没有提供，则为 "unknown"
+                    hydra_service_name = PORT_SERVICE_MAP.get(port_id, nmap_service_name)
+                    
+                    open_ports_for_ip.append((port_id, hydra_service_name))
+            
+            if open_ports_for_ip:
+                open_services_by_ip[ip_address] = open_ports_for_ip
+    except ET.ParseError as e:
+        print(f"[ERROR] 解析 Nmap XML 输出失败: {e}")
+        print(f"[DEBUG] XML Output was: {xml_output}")
+    return open_services_by_ip
 
-# 扫描单个IP的所有指定端口
-def scan_ip(ip, ports_to_scan, is_custom_scan=False):
-    """
-    扫描单个IP地址的指定端口列表。
-    Args:
-        ip (str): 目标IP.
-        ports_to_scan (list): 要扫描的端口号列表.
-        is_custom_scan (bool): 是否为自定义端口列表扫描.
-    """
-    # print(f"[INFO] Scanning IP: {ip} for ports: {ports_to_scan}")
-    open_ports_for_ip = []
-    threads = []
-    for port in ports_to_scan:
-        thread = threading.Thread(target=scan_port, args=(ip, port, open_ports_for_ip, is_custom_scan))
-        threads.append(thread)
-        thread.start()
-
-    for thread in threads:
-        thread.join()
-    
-    return ip, open_ports_for_ip
-
-# 主扫描函数，使用线程池处理多个IP
 def scan_multiple_ips(ip_list, custom_ports_str=None):
     """
-    扫描IP地址列表中的所有指定端口。
+    使用 Nmap 扫描IP地址列表中的指定端口。
     Args:
         ip_list (list): IP地址字符串列表.
         custom_ports_str (str, optional): 逗号分隔的自定义端口号字符串.
     """
-    ports_to_scan_final = []
-    is_custom_port_scan = False
-
+    ports_to_scan_str = ""
     if custom_ports_str:
         try:
-            ports_to_scan_final = [int(p.strip()) for p in custom_ports_str.split(',') if p.strip().isdigit()]
-            if not ports_to_scan_final:
-                print("[WARNING] 自定义端口列表为空或格式不正确，将使用默认端口列表。")
-                ports_to_scan_final = DEFAULT_PORTS_TO_SCAN
+            parsed_ports = [p.strip() for p in custom_ports_str.split(',') if p.strip().isdigit()]
+            if parsed_ports:
+                ports_to_scan_str = ",".join(parsed_ports)
+                print(f"[INFO] 将使用 Nmap 扫描自定义端口列表: {ports_to_scan_str}")
             else:
-                print(f"[INFO] 将扫描自定义端口列表: {ports_to_scan_final}")
-                is_custom_port_scan = True
-        except ValueError:
-            print("[WARNING] 自定义端口列表包含无效数字，将使用默认端口列表。")
-            ports_to_scan_final = DEFAULT_PORTS_TO_SCAN
-    else:
-        ports_to_scan_final = DEFAULT_PORTS_TO_SCAN
-        print(f"[INFO] 将扫描默认端口列表: {ports_to_scan_final}")
+                print("[WARNING] 自定义端口列表为空或格式不正确，将使用默认端口列表进行 Nmap 扫描。")
+        except Exception: # 更广泛地捕获解析错误
+            print("[WARNING] 解析自定义端口列表时出错，将使用默认端口列表进行 Nmap 扫描。")
 
+    if not ports_to_scan_str: # 如果自定义端口处理失败或未提供
+        ports_to_scan_str = ",".join(map(str, DEFAULT_PORTS_TO_SCAN))
+        print(f"[INFO] 将使用 Nmap 扫描默认端口列表: {ports_to_scan_str}")
 
-    results = {}
-    task_queue = Queue()
+    if not ip_list:
+        print("[ERROR] IP列表为空，无法执行Nmap扫描。")
+        return {}
+
+    # 构建 Nmap 命令
+    # -Pn: 无ping扫描 (假设主机在线)
+    # -sT: TCP connect() 扫描 (更可靠，但可能较慢且易被检测)
+    # -p: 指定端口
+    # -oX -: XML输出到标准输出
+    # --open: 只显示开放的端口
+    nmap_command = ["nmap", "-Pn", "-sT", "-p", ports_to_scan_str, "--open", "-oX", "-"] + ip_list
     
-    for ip in ip_list:
-        task_queue.put(ip)
+    print(f"[INFO] 执行 Nmap 命令: {' '.join(nmap_command)}")
 
-    def worker():
-        while not task_queue.empty():
-            try:
-                current_ip = task_queue.get_nowait()
-            except Queue.Empty:
-                break
-            
-            # print(f"[THREAD_WORKER] Scanning IP: {current_ip}")
-            ip_addr, open_ports = scan_ip(current_ip, ports_to_scan_final, is_custom_port_scan)
-            if open_ports:
-                results[ip_addr] = open_ports
-            task_queue.task_done()
-
-    threads = []
-    for _ in range(min(MAX_THREADS, len(ip_list))):
-        thread = threading.Thread(target=worker)
-        threads.append(thread)
-        thread.start()
-
-    task_queue.join() # 等待队列中的所有任务完成
-
-    for thread in threads:
-        thread.join() # 确保所有工作线程都已结束
-
-    return results
+    try:
+        process = subprocess.run(nmap_command, capture_output=True, text=True, check=True, timeout=300) # 5分钟超时
+        if process.stdout:
+            return parse_nmap_xml_output(process.stdout)
+        else:
+            print("[ERROR] Nmap 未返回任何输出。")
+            if process.stderr:
+                print(f"[NMAP_STDERR] {process.stderr.strip()}")
+            return {}
+    except FileNotFoundError:
+        print("[ERROR] Nmap 命令未找到。请确保 Nmap 已安装并在系统 PATH 中。")
+        return {}
+    except subprocess.CalledProcessError as e:
+        print(f"[ERROR] Nmap 执行失败，返回码: {e.returncode}")
+        if e.stdout:
+            print(f"[NMAP_STDOUT] {e.stdout.strip()}")
+        if e.stderr:
+            print(f"[NMAP_STDERR] {e.stderr.strip()}")
+        return {}
+    except subprocess.TimeoutExpired:
+        print("[ERROR] Nmap 执行超时。")
+        return {}
+    except Exception as e:
+        print(f"[ERROR] 执行 Nmap 时发生未知错误: {e}")
+        return {}
 
 if __name__ == '__main__':
     # 测试代码
-    # 假设我们有一个本地的FTP服务器在 127.0.0.1:21 和 HTTP 服务器在 127.0.0.1:80
+    # 确保你的机器上安装了 Nmap 并且在 PATH 中
     # 你可能需要根据你的环境修改这里的测试IP和预期结果
-    test_ips = ["127.0.0.1"] 
+    # 例如，在本地启动一个简单的HTTP服务器: python -m http.server 8080
+    # 然后用自定义端口测试: test_ips_custom = ["127.0.0.1"], custom_ports = "8080,22"
     
-    print(f"开始扫描IP: {test_ips} 针对端口: {DEFAULT_PORTS_TO_SCAN}")
-    scan_results = scan_multiple_ips(test_ips)
+    test_ips_default = ["127.0.0.1"] 
+    # 确保你的机器上至少有一个默认列表中的端口是开放的，例如 SSH (22) 或本地HTTP (80)
+    print(f"开始使用 Nmap 扫描IP: {test_ips_default} 针对默认端口")
+    scan_results_default = scan_multiple_ips(test_ips_default)
 
-    if scan_results:
-        print("\n扫描结果:")
-        for ip, open_ports in scan_results.items():
+    if scan_results_default:
+        print("\nNmap 默认端口扫描结果:")
+        for ip, open_ports in scan_results_default.items():
             print(f"  IP: {ip}")
             for port, service in open_ports:
                 print(f"    - Port {port} ({service}) is open")
     else:
-        print("\n没有发现开放端口。")
+        print("\nNmap 默认端口扫描未发现开放端口。")
 
-    # 测试一个不存在的IP或没有开放端口的IP
-    test_ips_no_open = ["192.0.2.1"] # RFC 5737 TEST-NET-1, 应该不可达
-    print(f"\n开始扫描IP: {test_ips_no_open} (预期无开放端口)")
-    scan_results_no_open = scan_multiple_ips(test_ips_no_open)
-    if not scan_results_no_open:
-        print("扫描完成，没有发现开放端口，符合预期。")
+    print("-" * 30)
+
+    # 测试自定义端口
+    test_ips_custom = ["127.0.0.1"]
+    # 假设你在 127.0.0.1 的 8080 端口运行了一个服务
+    custom_ports_test = "8080,22,9999" # 9999 应该是不开放的
+    print(f"\n开始使用 Nmap 扫描IP: {test_ips_custom} 针对自定义端口: {custom_ports_test}")
+    scan_results_custom = scan_multiple_ips(test_ips_custom, custom_ports_str=custom_ports_test)
+    
+    if scan_results_custom:
+        print("\nNmap 自定义端口扫描结果:")
+        for ip, open_ports in scan_results_custom.items():
+            print(f"  IP: {ip}")
+            for port, service in open_ports:
+                print(f"    - Port {port} ({service}) is open")
     else:
-        print(f"意外发现开放端口: {scan_results_no_open}")
+        print("\nNmap 自定义端口扫描未发现开放端口。")
+
+    print("-" * 30)
+    
+    # 测试一个通常不可达的IP
+    test_ips_unreachable = ["192.0.2.1"] # RFC 5737 TEST-NET-1
+    print(f"\n开始使用 Nmap 扫描不可达IP: {test_ips_unreachable} (预期无开放端口)")
+    scan_results_unreachable = scan_multiple_ips(test_ips_unreachable)
+    if not scan_results_unreachable:
+        print("Nmap 扫描完成，没有发现开放端口，符合预期。")
+    else:
+        print(f"Nmap 意外发现开放端口: {scan_results_unreachable}")
