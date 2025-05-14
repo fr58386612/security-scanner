@@ -1,2 +1,5 @@
-root
 admin
+root
+user
+test
+guest
