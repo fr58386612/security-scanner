@@ -6,10 +6,9 @@
 
 *   **IP 地址输入**: 从指定文件（默认为 `ip.txt`）读取目标 IP 地址。
 *   **端口扫描**:
-    *   扫描预定义的常见端口列表或通过命令行参数提供的自定义端口列表。
-    *   识别开放端口并尝试确定其上运行的服务。
-    *   多线程并发扫描多个 IP。
-    *   将扫描结果保存到 Excel 文件 (`open_ports_results.xlsx`)，每个 IP 地址占一行，其开放端口/服务信息汇总显示。
+    *   使用 **Nmap** 扫描预定义的常见端口列表或通过命令行参数提供的自定义端口列表。
+    *   识别开放端口并尝试确定其上运行的服务（基于 Nmap 的服务识别和 `PORT_SERVICE_MAP`）。
+    *   将扫描结果保存到 CSV 文件 (`open_ports_results.csv`)。
 *   **Hydra 暴力破解**:
     *   使用 THC-Hydra 对发现的服务（默认排除 HTTP/HTTPS）执行暴力破解攻击。
     *   支持通过命令行参数指定自定义的用户名和密码列表文件。
@@ -17,11 +16,11 @@
     *   多线程并发攻击多个服务（Hydra 实例数量可配置）。
     *   实时显示暴力破解任务的进度。
     *   立即以绿色高亮在控制台打印成功破解的凭证。
-    *   将所有成功破解的凭证追加到 `successful_logins.txt` 文件，并为每次运行添加时间戳。
+    *   将所有成功破解的凭证保存到 CSV 文件 (`successful_logins.csv`)，每次运行会覆盖旧文件。
 *   **输出与日志**:
     *   详细的控制台输出，显示各个阶段、进度和结果。
-    *   端口扫描结果保存到 `open_ports_results.xlsx`。
-    *   Hydra 成功登录的凭证保存到 `successful_logins.txt`。
+    *   端口扫描结果保存到 `open_ports_results.csv`。
+    *   Hydra 成功登录的凭证保存到 `successful_logins.csv`。
     *   Hydra 生成的临时文件存储在 `temp_hydra_files/` 目录中，并在程序完成时自动清理。
 *   **自定义配置**:
     *   指定目标 IP 文件。
@@ -33,11 +32,10 @@
 1.  **Python 3.x**: 确保您的系统已安装 Python 3。
 2.  **THC-Hydra**: Hydra 必须已安装，并且可以通过系统 PATH 访问（即，在终端输入 `hydra` 应能运行它）。
     *   在 Debian/Ubuntu 系统上: `sudo apt-get update && sudo apt-get install hydra`
-3.  **Python 库**:
-    *   `openpyxl`: 用于将端口扫描结果保存到 Excel 文件。使用 pip 安装:
-        ```bash
-        pip install openpyxl
-        ```
+3.  **Nmap**: Nmap 必须已安装，并且可以通过系统 PATH 访问（即，在终端输入 `nmap` 应能运行它）。
+    *   在 Debian/Ubuntu 系统上: `sudo apt-get update && sudo apt-get install nmap`
+4.  **Python 库**:
+    *   无外部库依赖（移除了 `openpyxl`）。
 
 ## 使用方法
 
@@ -91,8 +89,8 @@
 
 ## 输出文件
 
-*   `open_ports_results.xlsx`: 包含 IP 列表及其发现的开放端口和服务。
-*   `successful_logins.txt`: 追加记录 Hydra 攻击成功破解的凭证。
+*   `open_ports_results.csv`: 包含 IP 列表及其发现的开放端口和服务的 CSV 文件。
+*   `successful_logins.csv`: 包含 Hydra 攻击成功破解的凭证的 CSV 文件（每次运行会覆盖）。
 *   `temp_hydra_files/`: Hydra 中间文件的临时目录（自动创建和删除）。
 
 ## 重要提示
